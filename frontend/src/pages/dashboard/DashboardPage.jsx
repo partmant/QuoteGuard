@@ -1,0 +1,662 @@
+import { useEffect, useMemo, useState } from 'react'
+import {
+  getSummaryApi, getSalesAnalysisApi, getMonthlyTrendApi,
+  getQuoteStatusApi, getPopularProductsApi, getSalesStaffApi, getDepartmentStatsApi, getDepartmentsApi,
+} from '../../api/dashboardApi'
+import PageHeader from '../../components/common/PageHeader'
+import SegmentedControl from '../../components/common/SegmentedControl'
+import Pagination from '../../components/common/Pagination'
+import Button from '../../components/common/Button'
+import {
+  ResponsiveContainer, BarChart, Bar as RBar, AreaChart, Area, PieChart, Pie, Cell,
+  XAxis, YAxis, CartesianGrid, Tooltip, LabelList,
+} from 'recharts'
+
+// 차트 색상 팔레트
+const CHART = {
+  bar: '#60A5FA', barLast: '#1D4ED8',
+  line: '#7C3AED', area: '#7C3AED',
+  approved: '#22C55E', rejected: '#EF4444', pending: '#F59E0B',
+  grid: '#EEF0F4', axis: '#9CA3AF',
+}
+
+const STAFF_PAGE_SIZE = 8
+const DEPT_PAGE_SIZE = 8
+
+function getDateRange(periodKey) {
+  const today = new Date()
+  const pad = (n) => String(n).padStart(2, '0')
+  const fmt = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
+  const toStr = fmt(today)
+
+  // setMonth()는 월말(31일 등)에서 overflow가 발생하므로 직접 생성자 방식 사용
+  // new Date(y, m, d)에서 d > 해당 월 말일이면 overflow → 말일로 clamp
+  const subtractMonths = (months) => {
+    const y = today.getFullYear()
+    const m = today.getMonth() - months  // 음수여도 JS Date가 이월 처리
+    const d = today.getDate()
+    const lastDay = new Date(y, m + 1, 0).getDate()  // 목표 월의 말일
+    return fmt(new Date(y, m, Math.min(d, lastDay)))
+  }
+
+  if (periodKey === 'ONE_MONTH') return { from: subtractMonths(1), to: toStr }
+  if (periodKey === 'THREE_MONTHS') return { from: subtractMonths(3), to: toStr }
+  if (periodKey === 'SIX_MONTHS') return { from: subtractMonths(6), to: toStr }
+  return { from: '', to: '' }
+}
+
+const PERIODS = [
+  { key: '', label: '전체' },
+  { key: 'ONE_MONTH', label: '최근 1개월' },
+  { key: 'THREE_MONTHS', label: '최근 3개월' },
+  { key: 'SIX_MONTHS', label: '최근 6개월' },
+  { key: 'CUSTOM', label: '사용자 지정' },
+]
+
+const STATUS_LABEL = {
+  DRAFT: '임시저장', SUBMITTED: '작성완료', APPROVAL_NOT_REQUIRED: '승인불필요',
+  APPROVAL_PENDING: '승인대기', APPROVED: '승인완료', REJECTED: '반려',
+  REVISING: '수정중', SENT: '발송완료', EXPIRED: '만료', CANCELLED: '취소',
+}
+
+// 견적 흐름 단계 그룹 (작성 → 승인 → 발송 → 종료)
+const STATUS_PHASES = [
+  { key: 'write', title: '작성', color: '#3B82F6', statuses: ['DRAFT', 'SUBMITTED'] },
+  { key: 'approval', title: '승인', color: '#7C3AED', statuses: ['APPROVAL_NOT_REQUIRED', 'APPROVAL_PENDING', 'APPROVED', 'REJECTED', 'REVISING'] },
+  { key: 'send', title: '발송', color: '#22C55E', statuses: ['SENT'] },
+  { key: 'end', title: '종료', color: '#9CA3AF', statuses: ['EXPIRED', 'CANCELLED'] },
+]
+
+export default function DashboardPage() {
+  const [period, setPeriod] = useState('')
+  const [from, setFrom] = useState('')
+  const [to, setTo] = useState('')
+  const [department, setDepartment] = useState('') // 부서 스코프 ('' = 전체)
+  const [departments, setDepartments] = useState([])
+  const [deptError, setDeptError] = useState(null) // 부서 목록 로드 실패 표시
+
+  const [summary, setSummary] = useState(null)
+  const [analysis, setAnalysis] = useState(null)
+  const [trend, setTrend] = useState([])
+  const [statusCounts, setStatusCounts] = useState([])
+  const [popular, setPopular] = useState([])
+  const [popularSort, setPopularSort] = useState('order') // order | quantity | sales
+  const [staff, setStaff] = useState([])
+  const [staffSearch, setStaffSearch] = useState('')
+  const [staffPage, setStaffPage] = useState(0)
+  const [dept, setDept] = useState([])
+  const [deptSort, setDeptSort] = useState('amount') // amount | quotes | name
+  const [deptPage, setDeptPage] = useState(0)
+
+  const [error, setError] = useState(null)
+  const [loading, setLoading] = useState(false)
+
+  const load = async (opts) => {
+    setLoading(true); setError(null)
+    try {
+      // 부서별 통계 패널은 부서 필터와 무관하게 전 부서 표시 → department 제외한 opts 사용
+      const deptOpts = { period: opts.period, from: opts.from, to: opts.to }
+      const [s, a, t, q, p, st, dp] = await Promise.all([
+        getSummaryApi(opts), getSalesAnalysisApi(opts), getMonthlyTrendApi(opts),
+        getQuoteStatusApi(opts), getPopularProductsApi(opts, 10), getSalesStaffApi(opts),
+        getDepartmentStatsApi(deptOpts),
+      ])
+      setSummary(s); setAnalysis(a); setTrend(t); setStatusCounts(q); setPopular(p); setStaff(st); setDept(dp)
+      setStaffPage(0) // 기간 변경으로 데이터 갱신되면 페이지 초기화
+      setDeptPage(0)
+    } catch (e) {
+      setError(e.response?.data?.message ?? '대시보드 조회 실패')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  // CUSTOM: from·to 둘 다 있고 from<=to일 때만. 그 외: period 키 사용 (백엔드가 날짜 계산)
+  useEffect(() => {
+    if (period === 'CUSTOM') {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      if (from && to && from <= to) load({ period, from, to, department })
+    } else {
+      load({ period, ...(from && to ? { from, to } : {}), department })
+    }
+  }, [period, from, to, department])
+
+  // 부서 필터 드롭다운 목록 1회 로드 (실패 시 사용자에게 표시)
+  useEffect(() => {
+    getDepartmentsApi()
+      .then(d => { setDepartments(d); setDeptError(null) })
+      .catch(() => setDeptError('부서 목록을 불러오지 못했습니다.'))
+  }, [])
+
+  // 인기 제품: 정렬 옵션 (견적포함순/수량순/매출순)
+  const popularSorted = useMemo(() => {
+    const arr = [...popular]
+    if (popularSort === 'quantity') arr.sort((a, b) => (Number(b.totalQuantity) || 0) - (Number(a.totalQuantity) || 0))
+    else if (popularSort === 'sales') arr.sort((a, b) => (Number(b.totalSalesAmount) || 0) - (Number(a.totalSalesAmount) || 0))
+    else arr.sort((a, b) => (Number(b.orderCount) || 0) - (Number(a.orderCount) || 0))
+    return arr
+  }, [popular, popularSort])
+
+  // 부서별: 정렬 옵션 (총액순/작성순/이름순)
+  const deptSorted = useMemo(() => {
+    const arr = [...dept]
+    if (deptSort === 'name') arr.sort((a, b) => String(a.department).localeCompare(String(b.department), 'ko'))
+    else if (deptSort === 'quotes') arr.sort((a, b) => (Number(b.totalQuotes) || 0) - (Number(a.totalQuotes) || 0))
+    else arr.sort((a, b) => (Number(b.totalAmount) || 0) - (Number(a.totalAmount) || 0))
+    return arr
+  }, [dept, deptSort])
+  const deptTotalPages = Math.ceil(deptSorted.length / DEPT_PAGE_SIZE)
+  const deptSafePage = Math.min(deptPage, Math.max(0, deptTotalPages - 1))
+  const deptPaged = deptSorted.slice(deptSafePage * DEPT_PAGE_SIZE, deptSafePage * DEPT_PAGE_SIZE + DEPT_PAGE_SIZE)
+
+  // 차트용 월별 데이터 ("2026-06" → "6월", 이번 달 강조 플래그)
+  const trendChart = useMemo(() => {
+    const now = new Date()
+    const curKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`
+    // 데이터가 2개 연도 이상 걸치면 "6월" 중복으로 모호 → 라벨에 연도 표시
+    const multiYear = new Set(trend.map(t => String(t.month ?? '').split('-')[0])).size > 1
+    return trend.map((t) => ({
+      month: monthLabel(t.month, multiYear),
+      quoteCount: Number(t.quoteCount) || 0,
+      totalAmount: Number(t.totalAmount) || 0,
+      isCurrent: t.month === curKey, // 배열 순서가 아닌 실제 이번 달(YYYY-MM)과 비교
+    }))
+  }, [trend])
+
+  // 금액 축 단위 자동 결정 (최대값 기준: 억원 / 만원 / 원)
+  const amountUnit = useMemo(() => {
+    const max = Math.max(0, ...trendChart.map(t => t.totalAmount))
+    if (max >= 1e8) return { div: 1e8, label: '억원', digits: 1 }
+    if (max >= 1e4) return { div: 1e4, label: '만원', digits: 0 }
+    return { div: 1, label: '원', digits: 0 }
+  }, [trendChart])
+
+  // 승인/반려/대기 도넛 (승인·반려는 summary, 대기는 상태별 건수의 승인대기)
+  const donutData = useMemo(() => {
+    const pending = statusCounts.find(s => s.status === 'APPROVAL_PENDING')?.count ?? 0
+    return [
+      { name: '승인', value: Number(summary?.approvedQuotes) || 0, color: CHART.approved },
+      { name: '반려', value: Number(summary?.rejectedQuotes) || 0, color: CHART.rejected },
+      { name: '대기', value: Number(pending) || 0, color: CHART.pending },
+    ]
+  }, [summary, statusCounts])
+  const donutTotal = useMemo(() => donutData.reduce((a, b) => a + b.value, 0), [donutData])
+  const approvedValue = useMemo(() => donutData.find(d => d.name === '승인')?.value ?? 0, [donutData])
+  const rejectedValue = useMemo(() => donutData.find(d => d.name === '반려')?.value ?? 0, [donutData])
+  // 승인율 = 승인 / (승인+반려) — 대기(pending) 제외한 '결정된 건' 기준
+  const approvalRate = useMemo(() => {
+    const decided = approvedValue + rejectedValue
+    return decided ? Math.round((approvedValue / decided) * 100) : 0
+  }, [approvedValue, rejectedValue])
+
+  const handlePeriodChange = (key) => {
+    setPeriod(key)
+    if (key !== 'CUSTOM') {
+      const { from: f, to: t } = getDateRange(key)
+      setFrom(f)
+      setTo(t)
+    }
+  }
+  const handleFromChange = (e) => { setFrom(e.target.value); setPeriod('CUSTOM') }
+  const handleToChange = (e) => { setTo(e.target.value); setPeriod('CUSTOM') }
+
+  // 영업사원별: 이름/사번 검색 + 페이징 (클라이언트 처리)
+  const staffFiltered = useMemo(() => {
+    const q = staffSearch.trim().toLowerCase()
+    return q ? staff.filter(s => s.userName?.toLowerCase().includes(q)) : staff
+  }, [staff, staffSearch])
+  const staffTotalPages = Math.ceil(staffFiltered.length / STAFF_PAGE_SIZE)
+  const staffSafePage = Math.min(staffPage, Math.max(0, staffTotalPages - 1))
+  const staffPaged = staffFiltered.slice(staffSafePage * STAFF_PAGE_SIZE, staffSafePage * STAFF_PAGE_SIZE + STAFF_PAGE_SIZE)
+
+  return (
+    <div>
+      <PageHeader
+        breadcrumbs={['통계', '대시보드']}
+        breadcrumbSep=">"
+        title="통계 대시보드"
+        actions={
+          <div className="flex items-center gap-2 flex-wrap">
+            <SegmentedControl
+              variant="pills"
+              name="period-filter"
+              options={PERIODS.map(p => ({ value: p.key, label: p.label }))}
+              value={period}
+              onChange={handlePeriodChange}
+            />
+            <span className="flex items-center gap-1.5">
+              <input type="date" className="form-input" style={{ width: '140px', height: '34px' }} value={from} onChange={handleFromChange} />
+              <span style={{ color: 'var(--color-text-muted)', fontSize: '13px' }}>~</span>
+              <input type="date" className="form-input" style={{ width: '140px', height: '34px' }} value={to} onChange={handleToChange} />
+            </span>
+            <span style={{ width: '1px', height: '20px', background: 'var(--color-border)' }} />
+            <select className="form-select" style={{ width: '150px', height: '34px' }}
+              aria-label="부서 필터" value={department} onChange={(e) => setDepartment(e.target.value)}>
+              <option value="">부서 전체</option>
+              {departments.map(d => <option key={d} value={d}>{d}</option>)}
+            </select>
+            {deptError && <span style={{ fontSize: '12px', color: 'var(--color-danger)' }}>{deptError}</span>}
+          </div>
+        }
+      />
+
+      {error && (
+        <div role="alert" className="mb-3 text-sm rounded-[var(--radius-sm)] px-4 py-2.5"
+          style={{ color: 'var(--color-danger)', background: '#FEF2F2', border: '1px solid #FECACA' }}>
+          {error}
+        </div>
+      )}
+      {period === 'CUSTOM' && from && to && from > to && (
+        <div className="mb-3 text-sm" style={{ color: 'var(--color-warning)' }}>종료일이 시작일보다 빠릅니다. 기간을 다시 선택하세요.</div>
+      )}
+
+      {/* ── 본문 (로딩 중엔 반투명) ── */}
+      <div style={{ opacity: loading ? 0.6 : 1, transition: 'opacity 0.15s' }}>
+
+      {/* ── 상단: 견적 처리 현황(스파크라인) + 월별 견적 수 추이(막대+금액) ── */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-4">
+        {/* 좌: 견적 처리 현황 */}
+        <Panel title="견적 처리 현황">
+          <div className="grid grid-cols-2 gap-3">
+            <MiniStatCard label="총 견적 수" value={summary?.totalQuotes} color="var(--color-primary)" trend={trend} dataKey="quoteCount" />
+            <MiniStatCard label="승인 완료" value={summary?.approvedQuotes} color={CHART.approved} trend={trend} dataKey="approvedCount" />
+            <MiniStatCard label="반려" value={summary?.rejectedQuotes} color={CHART.rejected} trend={trend} dataKey="rejectedCount" />
+            <MiniStatCard label="발송 완료" value={summary?.sentQuotes} color="#2563EB" trend={trend} dataKey="sentCount" />
+          </div>
+        </Panel>
+
+        {/* 우: 월별 견적 수 추이 + 하단 금액 요약 */}
+        <Panel title="월별 견적 수 추이"
+          action={trend.length > 0 && <span className="text-xs" style={{ color: 'var(--color-text-muted)' }}>최근 {trend.length}개월</span>}>
+          {trendChart.length === 0 ? <Empty /> : (
+            <ResponsiveContainer width="100%" height={200}>
+              <BarChart data={trendChart} margin={{ top: 16, right: 8, left: -8, bottom: 0 }}>
+                <CartesianGrid vertical={false} stroke={CHART.grid} />
+                <XAxis dataKey="month" tickLine={false} axisLine={false} tick={{ fontSize: 12, fill: CHART.axis }} />
+                <YAxis tickLine={false} axisLine={false} tick={{ fontSize: 12, fill: CHART.axis }} allowDecimals={false} width={32} />
+                <Tooltip cursor={{ fill: 'rgba(0,0,0,0.04)' }} formatter={(v) => [`${num(v)}건`, '견적 수']} />
+                <RBar dataKey="quoteCount" radius={[4, 4, 0, 0]} maxBarSize={48}>
+                  <LabelList dataKey="quoteCount" position="top" style={{ fontSize: 11, fill: CHART.axis }} />
+                  {trendChart.map((d) => (
+                    <Cell key={d.month} fill={d.isCurrent ? CHART.barLast : CHART.bar} />
+                  ))}
+                </RBar>
+              </BarChart>
+            </ResponsiveContainer>
+          )}
+          <div className="grid grid-cols-4 gap-2 mt-3 pt-3" style={{ borderTop: '1px solid var(--color-border)' }}>
+            <MiniAmount label="총 견적 금액" value={wonShort(summary?.totalAmount)} />
+            <MiniAmount label="총 공급가액" value={wonShort(summary?.totalSupplyAmount)} />
+            <MiniAmount label="총 예상 이익금" value={wonShort(summary?.totalProfitAmount)} color="var(--color-success)" />
+            <MiniAmount label="할인율 / 이익률" value={`${pct(summary?.averageDiscountRate)} / ${pct(summary?.averageProfitRate)}`} />
+          </div>
+        </Panel>
+      </div>
+
+      {/* ── 영업 현황 분석 ── */}
+      {analysis && (
+        <div className="rounded-[var(--radius-md)] p-4 mb-4"
+          style={{ background: '#EFF6FF', border: '1px solid var(--color-border)' }}>
+          <div className="flex items-center gap-4 mb-2 text-sm">
+            <span className="font-bold">영업 현황 분석</span>
+            <span className="text-[var(--color-text-sub)]">승인율 <b style={{ color: 'var(--color-success)' }}>{pct(analysis.approvalRate)}</b></span>
+            <span className="text-[var(--color-text-sub)]">반려율 <b style={{ color: 'var(--color-danger)' }}>{pct(analysis.rejectionRate)}</b></span>
+          </div>
+          {analysis.summary && <p className="text-sm text-[var(--color-text-main)]">{analysis.summary}</p>}
+          {analysis.recommendation && <p className="text-sm mt-1" style={{ color: 'var(--color-primary)' }}>💡 {analysis.recommendation}</p>}
+        </div>
+      )}
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        {/* ── 월별 견적 총액 및 추이 (꺾은선 + 영역) ── */}
+        <Panel title="월별 견적 총액 및 추이"
+          action={<span className="text-xs" style={{ color: 'var(--color-text-muted)' }}>단위: {amountUnit.label}</span>}>
+          {trendChart.length === 0 ? <Empty /> : (
+            <ResponsiveContainer width="100%" height={240}>
+              <AreaChart data={trendChart} margin={{ top: 16, right: 12, left: -16, bottom: 0 }}>
+                <defs>
+                  <linearGradient id="amountFill" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stopColor={CHART.area} stopOpacity={0.22} />
+                    <stop offset="100%" stopColor={CHART.area} stopOpacity={0} />
+                  </linearGradient>
+                </defs>
+                <CartesianGrid vertical={false} stroke={CHART.grid} />
+                <XAxis dataKey="month" tickLine={false} axisLine={false} tick={{ fontSize: 12, fill: CHART.axis }} />
+                <YAxis tickLine={false} axisLine={false} tick={{ fontSize: 12, fill: CHART.axis }}
+                  tickFormatter={(v) => amountTick(v, amountUnit)} width={60} />
+                <Tooltip formatter={(v) => [won(v), '견적 총액']} />
+                <Area type="monotone" dataKey="totalAmount" stroke={CHART.line} strokeWidth={2.5}
+                  fill="url(#amountFill)" dot={{ r: 3, fill: CHART.line }} activeDot={{ r: 5 }} />
+              </AreaChart>
+            </ResponsiveContainer>
+          )}
+        </Panel>
+
+        {/* ── 승인 / 반려 비율 (도넛) ── */}
+        <Panel title="승인 / 반려 비율">
+          {donutTotal === 0 ? <Empty /> : (
+            <div className="flex items-center justify-center gap-6" style={{ minHeight: '240px' }}>
+              <div style={{ position: 'relative', width: 200, height: 200, flexShrink: 0 }}>
+                <ResponsiveContainer width="100%" height="100%">
+                  <PieChart>
+                    <Pie data={donutData} dataKey="value" nameKey="name" cx="50%" cy="50%"
+                      innerRadius={62} outerRadius={90} paddingAngle={2} startAngle={90} endAngle={-270}>
+                      {donutData.map((d) => <Cell key={d.name} fill={d.color} />)}
+                    </Pie>
+                    <Tooltip formatter={(v, n) => [`${num(v)}건`, n]} />
+                  </PieChart>
+                </ResponsiveContainer>
+                <div style={{ position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', pointerEvents: 'none' }}>
+                  <span className="text-[28px] font-bold leading-none" style={{ color: CHART.approved }}>
+                    {approvalRate}%
+                  </span>
+                  <span className="text-[12px] text-[var(--color-text-sub)] mt-1">승인율</span>
+                </div>
+              </div>
+              <div className="flex-1 min-w-0">
+                <div className="text-xs text-[var(--color-text-muted)] mb-2.5">전체 {num(donutTotal)}건</div>
+                <div className="space-y-2.5">
+                  {donutData.map(d => {
+                    const p = donutTotal ? Math.round((d.value / donutTotal) * 100) : 0
+                    return (
+                      <div key={d.name}>
+                        <div className="flex items-center justify-between text-sm mb-1">
+                          <span className="flex items-center gap-2">
+                            <span style={{ width: 10, height: 10, borderRadius: 3, background: d.color }} />
+                            <span className="text-[var(--color-text-sub)]">{d.name}</span>
+                          </span>
+                          <span className="flex items-center gap-2 text-[var(--color-text-main)]" style={{ fontVariantNumeric: 'tabular-nums' }}>
+                            <b style={{ display: 'inline-block', minWidth: '44px', textAlign: 'right' }}>{num(d.value)}건</b>
+                            <span className="text-[var(--color-text-muted)]" style={{ display: 'inline-block', minWidth: '36px', textAlign: 'right' }}>{p}%</span>
+                          </span>
+                        </div>
+                        <div style={{ height: 6, borderRadius: 999, background: '#F3F4F6', overflow: 'hidden' }}>
+                          <div style={{ height: '100%', width: `${p}%`, background: d.color, borderRadius: 999, transition: 'width 0.3s' }} />
+                        </div>
+                      </div>
+                    )
+                  })}
+                </div>
+              </div>
+            </div>
+          )}
+        </Panel>
+
+        {/* ── 견적 상태별 건수 (흐름 파이프라인, 2×2 지그재그) ── */}
+        <Panel title="견적 상태별 건수 (진행 흐름)">
+          {statusCounts.length === 0 ? <Empty /> : <StatusFlow counts={statusCounts} />}
+        </Panel>
+
+        {/* ── 인기 제품 순위 (견적포함순 / 수량순 / 매출순) ── */}
+        <Panel title="인기 제품 순위 (TOP 10)"
+          action={
+            <div style={{ display: 'flex', gap: '4px' }}>
+              <Button size="sm" variant={popularSort === 'order' ? 'primary' : 'ghost'} onClick={() => setPopularSort('order')}>견적포함순</Button>
+              <Button size="sm" variant={popularSort === 'quantity' ? 'primary' : 'ghost'} onClick={() => setPopularSort('quantity')}>수량순</Button>
+              <Button size="sm" variant={popularSort === 'sales' ? 'primary' : 'ghost'} onClick={() => setPopularSort('sales')}>매출순</Button>
+            </div>
+          }>
+          <table className="w-full text-sm">
+            <thead className="text-xs text-[var(--color-text-muted)]">
+              <tr>
+                <th className="text-left py-1 w-8">#</th>
+                <th className="text-left">제품</th>
+                <th className="text-right" style={popularSort === 'order' ? { color: 'var(--color-primary)' } : undefined}>견적포함</th>
+                <th className="text-right" style={popularSort === 'quantity' ? { color: 'var(--color-primary)' } : undefined}>수량</th>
+                <th className="text-right" style={popularSort === 'sales' ? { color: 'var(--color-primary)' } : undefined}>매출기여</th>
+              </tr>
+            </thead>
+            <tbody>
+              {/* 항상 10행 고정 — 데이터 없는 자리는 순번 + '-'로 채워 높이 유지 */}
+              {Array.from({ length: 10 }, (_, i) => {
+                const p = popularSorted[i]
+                if (!p) {
+                  // 빈 슬롯: 순번·값 없이 높이만 유지 (시선이 실제 데이터에 집중되게)
+                  return (
+                    <tr key={`empty-${i}`} style={{ borderTop: '1px dashed var(--color-border)' }}>
+                      <td className="py-1.5">&nbsp;</td>
+                      <td></td><td></td><td></td><td></td>
+                    </tr>
+                  )
+                }
+                return (
+                  <tr key={p.productId} style={{ borderTop: '1px solid var(--color-border)' }}>
+                    <td className="py-1.5 text-[var(--color-text-muted)]">{i + 1}</td>
+                    <td className="font-medium">{p.productName}</td>
+                    <td className="text-right" style={{ fontWeight: popularSort === 'order' ? 700 : 400 }}>{num(p.orderCount)}</td>
+                    <td className="text-right" style={{ color: 'var(--color-text-sub)', fontWeight: popularSort === 'quantity' ? 700 : 400 }}>{num(p.totalQuantity)}</td>
+                    <td className="text-right" style={{ color: 'var(--color-primary)', fontWeight: popularSort === 'sales' ? 700 : 400 }}>{won(p.totalSalesAmount)}</td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+        </Panel>
+
+        {/* ── 영업사원별 통계 ── */}
+        <Panel title="영업사원별 통계"
+          action={staff.length > 0 && (
+            <input className="form-input" style={{ width: '170px', height: '32px', fontSize: '13px' }}
+              aria-label="영업사원 이름 검색" placeholder="이름 검색" value={staffSearch}
+              onChange={e => { setStaffSearch(e.target.value); setStaffPage(0) }} />
+          )}>
+          {staff.length === 0 ? <Empty /> : staffFiltered.length === 0 ? (
+            <p className="text-[var(--color-text-muted)] text-[13px] text-center py-8">검색 결과가 없습니다</p>
+          ) : (
+            <>
+              <table className="w-full text-sm">
+                <thead className="text-xs text-[var(--color-text-muted)]">
+                  <tr><th className="text-left py-1">영업사원</th><th className="text-right">작성</th><th className="text-right">승인</th><th className="text-right">반려</th><th className="text-right">승인율</th><th className="text-right">반려율</th></tr>
+                </thead>
+                <tbody>
+                  {staffPaged.map(s => (
+                    <tr key={s.userId} style={{ borderTop: '1px solid var(--color-border)' }}>
+                      <td className="py-1.5 font-medium">{s.userName}</td>
+                      <td className="text-right">{num(s.totalQuotes)}</td>
+                      <td className="text-right" style={{ color: 'var(--color-success)' }}>{num(s.approvedQuotes)}</td>
+                      <td className="text-right" style={{ color: 'var(--color-danger)' }}>{num(s.rejectedQuotes)}</td>
+                      <td className="text-right">{pct(s.approvalRate)}</td>
+                      <td className="text-right">{pct(s.rejectionRate)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              <Pagination page={staffSafePage} totalPages={staffTotalPages} onChange={setStaffPage} showEdge={false} />
+            </>
+          )}
+        </Panel>
+
+        {/* ── 부서별 통계 ── */}
+        <Panel title="부서별 통계"
+          action={dept.length > 0 && (
+            <select className="form-select" style={{ height: '30px', fontSize: '12px', width: '104px' }}
+              aria-label="부서 정렬 기준" value={deptSort} onChange={e => { setDeptSort(e.target.value); setDeptPage(0) }}>
+              <option value="amount">총액순</option>
+              <option value="quotes">작성순</option>
+              <option value="name">이름순</option>
+            </select>
+          )}>
+          {dept.length === 0 ? <Empty /> : (
+            <>
+              <table className="w-full text-sm">
+                <thead className="text-xs text-[var(--color-text-muted)]">
+                  <tr><th className="text-left py-1">부서</th><th className="text-right">작성</th><th className="text-right">승인율</th><th className="text-right">반려율</th><th className="text-right">견적 총액</th></tr>
+                </thead>
+                <tbody>
+                  {deptPaged.map(d => {
+                    const clickable = d.department !== '미지정'
+                    const isSel = department === d.department
+                    return (
+                      <tr key={d.department}
+                        onClick={clickable ? () => setDepartment(d.department) : undefined}
+                        title={clickable ? `${d.department} 부서로 필터` : undefined}
+                        style={{ borderTop: '1px solid var(--color-border)', cursor: clickable ? 'pointer' : 'default', background: isSel ? '#EFF6FF' : 'transparent' }}>
+                        <td className="py-1.5 font-medium" style={{ color: isSel ? 'var(--color-primary)' : undefined }}>{d.department}</td>
+                        <td className="text-right">{num(d.totalQuotes)}</td>
+                        <td className="text-right" style={{ color: 'var(--color-success)' }}>{pct(d.approvalRate)}</td>
+                        <td className="text-right" style={{ color: 'var(--color-danger)' }}>{pct(d.rejectionRate)}</td>
+                        <td className="text-right" style={{ color: 'var(--color-primary)' }}>{won(d.totalAmount)}</td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+              <Pagination page={deptSafePage} totalPages={deptTotalPages} onChange={setDeptPage} showEdge={false} />
+            </>
+          )}
+        </Panel>
+      </div>
+
+      </div>{/* end opacity wrapper */}
+    </div>
+  )
+}
+
+// ── 헬퍼 ──
+function num(v) { return v == null ? '0' : Number(v).toLocaleString('ko-KR') }
+function won(v) { return v == null || v === '' ? '-' : Number(v).toLocaleString('ko-KR') + '원' }
+function pct(v) { return v == null || v === '' ? '0%' : `${Number(v)}%` }
+
+// "2026-06" → "6월" (포맷 어긋나면 원본 반환)
+// withYear=true면 여러 해가 섞일 때 연도 모호성 방지용으로 "25년 6월" 형태로 표시
+function monthLabel(m, withYear = false) {
+  const [yyyy, mm] = String(m ?? '').split('-')
+  if (!mm) return String(m ?? '')
+  const label = `${Number(mm)}월`
+  return withYear && yyyy ? `${yyyy.slice(2)}년 ${label}` : label
+}
+
+// 금액 축 라벨: 선택된 단위(억/만/원)로 나눠 표시 (예: unit=억원 → 427000000 → "4.3")
+function amountTick(v, unit) {
+  const n = (Number(v) || 0) / unit.div
+  return n.toLocaleString('ko-KR', { maximumFractionDigits: unit.digits })
+}
+
+// 금액 축약 (억/만원) — 요약 카드용 (정확값 아님). 음수(손실)도 부호 유지하며 축약
+function wonShort(v) {
+  const n = Number(v) || 0
+  const abs = Math.abs(n)
+  const sign = n < 0 ? '-' : ''
+  if (abs >= 1e8) return `${sign}${(abs / 1e8).toFixed(1).replace(/\.0$/, '')}억`
+  if (abs >= 1e4) return `${sign}${Math.round(abs / 1e4).toLocaleString('ko-KR')}만`
+  return `${n.toLocaleString('ko-KR')}원`
+}
+
+// 견적 처리 현황 카드: 값 + 최근 추이 스파크라인 (양끝 달 라벨 + 호버 툴팁)
+function MiniStatCard({ label, value, color, trend, dataKey }) {
+  const spark = (trend ?? []).map((t) => ({ month: monthLabel(t.month), v: Number(t[dataKey]) || 0 }))
+  return (
+    <div className="rounded-[var(--radius-md)] px-4 py-3"
+      style={{ border: '1px solid var(--color-border)', background: 'var(--color-bg-white)' }}>
+      <p className="text-xs text-[var(--color-text-sub)] mb-1">{label}</p>
+      <p className="text-[22px] font-bold leading-none" style={{ color }}>
+        {num(value)}<span className="text-[12px] font-normal text-[var(--color-text-sub)] ml-1">건</span>
+      </p>
+      <div style={{ height: 36, marginTop: 6 }}>
+        {spark.length > 1 && (
+          <ResponsiveContainer width="100%" height="100%">
+            <AreaChart data={spark} margin={{ top: 2, right: 0, left: 0, bottom: 0 }}>
+              <XAxis dataKey="month" hide />
+              <Tooltip formatter={(v, n) => [`${num(v)}건`, n]}
+                contentStyle={{ fontSize: 11, padding: '4px 8px', borderRadius: 6 }} />
+              <Area type="monotone" dataKey="v" name={label} stroke={color} strokeWidth={1.5}
+                fill={color} fillOpacity={0.12} dot={false} isAnimationActive={false} />
+            </AreaChart>
+          </ResponsiveContainer>
+        )}
+      </div>
+      {spark.length > 1 ? (
+        <div className="flex justify-between text-[10px] mt-1" style={{ color: 'var(--color-text-muted)' }}>
+          <span>{spark[0].month}</span>
+          <span>{spark[spark.length - 1].month}</span>
+        </div>
+      ) : (
+        <p className="text-[11px] text-[var(--color-text-muted)] mt-1">추이 데이터 부족</p>
+      )}
+    </div>
+  )
+}
+
+// 월별 추이 하단 금액 지표
+function MiniAmount({ label, value, color }) {
+  return (
+    <div>
+      <p className="text-[11px] text-[var(--color-text-sub)] mb-0.5">{label}</p>
+      <p className="text-[15px] font-bold leading-tight" style={{ color: color ?? 'var(--color-text-main)' }}>{value}</p>
+    </div>
+  )
+}
+
+function Panel({ title, action, children }) {
+  return (
+    <div className="rounded-[var(--radius-md)] px-6 py-5 flex flex-col"
+      style={{ background: 'var(--color-bg-white)', border: '1px solid var(--color-border)', boxShadow: 'var(--shadow-sm)' }}>
+      <div className="flex items-center justify-between gap-2 mb-4">
+        <h2 className="text-sm font-bold text-[var(--color-text-main)]">{title}</h2>
+        {action}
+      </div>
+      <div className="flex-1 min-h-0">{children}</div>
+    </div>
+  )
+}
+
+function Empty() {
+  return <p className="text-[var(--color-text-muted)] text-[13px] text-center py-8">데이터가 없습니다</p>
+}
+
+// 견적 상태 흐름: 2×2 지그재그 (작성→승인 ↓ 발송→종료)
+function StatusFlow({ counts }) {
+  const byStatus = {}
+  for (const s of counts) byStatus[s.status] = s.count
+  const grandTotal = Object.values(byStatus).reduce((sum, v) => sum + (Number(v) || 0), 0)
+
+  const renderCard = (phase, step) => {
+    const total = phase.statuses.reduce((sum, st) => sum + (byStatus[st] || 0), 0)
+    const share = grandTotal ? Math.round((total / grandTotal) * 100) : 0
+    return (
+      <div key={phase.key} className="flex-1 rounded-[var(--radius-md)] p-4 flex flex-col"
+        style={{ minWidth: 0, border: '1px solid var(--color-border)', borderTop: `3px solid ${phase.color}`, background: 'var(--color-bg-white)' }}>
+        <div className="flex items-center justify-between mb-3">
+          <span className="flex items-center gap-2">
+            <span style={{ width: 22, height: 22, borderRadius: '50%', background: phase.color, color: '#fff', fontSize: '11px', fontWeight: 700, lineHeight: 1, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>{step}</span>
+            <span className="text-[16px] font-bold" style={{ color: phase.color }}>{phase.title}</span>
+          </span>
+          <span className="text-[15px] font-bold text-[var(--color-text-main)]">{num(total)}건</span>
+        </div>
+        <div className="space-y-1">
+          {phase.statuses.map(st => (
+            <div key={st} className="flex items-center justify-between text-xs">
+              <span className="text-[var(--color-text-sub)]">{STATUS_LABEL[st] ?? st}</span>
+              <span className={byStatus[st] ? 'text-[var(--color-text-main)]' : 'text-[var(--color-text-muted)]'}>{num(byStatus[st] || 0)}건</span>
+            </div>
+          ))}
+        </div>
+        {/* 하단: 단계 비율 막대 (전체 대비) — mt-auto로 카드 아래에 고정해 빈 공간 채움 */}
+        <div className="mt-auto pt-3">
+          <div className="flex items-center justify-between text-[10px] mb-1" style={{ color: 'var(--color-text-muted)' }}>
+            <span>단계 비율</span><span>{share}%</span>
+          </div>
+          <div style={{ height: 6, borderRadius: 999, background: '#F3F4F6', overflow: 'hidden' }}>
+            <div style={{ height: '100%', width: `${share}%`, background: phase.color, borderRadius: 999, transition: 'width 0.3s' }} />
+          </div>
+        </div>
+      </div>
+    )
+  }
+  const arrow = (ch) => (
+    <div className="flex items-center justify-center shrink-0 text-lg" style={{ color: 'var(--color-text-muted)' }}>{ch}</div>
+  )
+
+  return (
+    <div className="flex flex-col gap-1.5 h-full justify-center">
+      <div className="flex items-stretch gap-1.5">
+        {renderCard(STATUS_PHASES[0], 1)}{arrow('→')}{renderCard(STATUS_PHASES[1], 2)}
+      </div>
+      {arrow('↙')}
+      <div className="flex items-stretch gap-1.5">
+        {renderCard(STATUS_PHASES[2], 3)}{arrow('→')}{renderCard(STATUS_PHASES[3], 4)}
+      </div>
+    </div>
+  )
+}
+

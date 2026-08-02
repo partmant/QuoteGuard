@@ -1,0 +1,33 @@
+.search-panel {
+  background: var(--color-bg-white);
+  border: 2px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  padding: 18px 24px;
+  margin-bottom: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  box-shadow: var(--shadow-sm);
+}
+
+.search-row {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.search-row__label {
+  flex-shrink: 0;
+  width: 90px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-text-sub);
+}
+
+.search-row__controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  flex: 1;
+}

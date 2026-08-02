@@ -1,0 +1,688 @@
+/* ── TrainingPage 전용 스타일 ── */
+
+.training-page {
+  min-height: 100vh;
+  background: var(--color-bg-main);
+}
+
+.training-page__shell {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 320px;
+  gap: 24px;
+  width: 100%;
+  padding: 0 32px 40px;
+  align-items: start;
+}
+
+.training-page__main {
+  min-width: 0;
+}
+
+.training-page__aside {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  position: sticky;
+  top: 16px;
+}
+
+.training-intro {
+  margin-bottom: 20px;
+}
+
+.training-intro__badges {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.training-header__required {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  background: #FEF2F2;
+  color: #DC2626;
+  border: 1px solid #FECACA;
+}
+
+.training-header__required--alert {
+  background: #FFF7ED;
+  color: #C2410C;
+  border-color: #FDBA74;
+}
+
+.training-intro__desc {
+  margin: 0 0 16px;
+  font-size: 14px;
+  line-height: 1.6;
+  color: var(--color-text-sub);
+}
+
+/* 교육 필요 경고 배너 */
+.training-notice {
+  margin-bottom: 12px;
+  padding: 14px 16px;
+  border-radius: var(--radius-sm);
+  background: #FFFBEB;
+  border: 1px solid #FDE68A;
+}
+
+.training-notice__title {
+  font-size: 14px;
+  font-weight: 700;
+  color: #92400E;
+  margin-bottom: 4px;
+}
+
+.training-notice__body {
+  font-size: 13px;
+  line-height: 1.5;
+  color: #B45309;
+}
+
+.training-notice--alert {
+  background: #FFF7ED;
+  border-color: #FDBA74;
+}
+
+.training-notice--alert .training-notice__title {
+  color: #9A3412;
+}
+
+.training-notice--alert .training-notice__body {
+  color: #C2410C;
+}
+
+/* 코스 탭 */
+.training-course-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+.training-course-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 14px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--color-border);
+  background: var(--color-bg-white);
+  color: var(--color-text-sub);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.training-course-tab--active {
+  border-color: var(--color-primary);
+  background: #EEF4FF;
+  color: var(--color-primary);
+  font-weight: 700;
+}
+
+.training-course-tab--done {
+  border-color: #BBF7D0;
+}
+
+.training-course-tab__badge {
+  font-size: 11px;
+  font-weight: 700;
+  color: #16A34A;
+}
+
+/* 요약 카드 */
+.training-summary {
+  margin-bottom: 20px;
+}
+
+.training-summary-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.training-summary-card {
+  background: var(--color-bg-white);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: 14px 16px;
+  box-shadow: var(--shadow-sm);
+}
+
+.training-summary-card__label {
+  margin: 0 0 8px;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #4B5563;
+}
+
+.training-summary-card__value {
+  margin: 0 0 8px;
+  font-size: 18px;
+  font-weight: 700;
+  line-height: 1.2;
+  color: var(--color-text-main);
+}
+
+.training-summary-card__value--done {
+  color: #16A34A;
+}
+
+.training-summary-card__value--progress {
+  color: #7C3AED;
+}
+
+.training-summary-card__bar {
+  height: 8px;
+  border-radius: 999px;
+  background: #F3F4F6;
+  overflow: hidden;
+  margin-bottom: 8px;
+}
+
+.training-summary-card__bar-fill {
+  height: 100%;
+  background: #7C3AED;
+  border-radius: 999px;
+}
+
+.training-summary-card__bar-fill--done {
+  background: #16A34A;
+}
+
+.training-summary-card__hint {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--color-text-muted);
+}
+
+.training-summary-card__list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.training-summary-card__list li {
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--color-text-sub);
+  padding-left: 18px;
+  position: relative;
+}
+
+.training-summary-card__list li::before {
+  content: '✓';
+  position: absolute;
+  left: 0;
+  color: #16A34A;
+  font-weight: 700;
+}
+
+/* 카드 공통 */
+.training-card {
+  background: var(--color-bg-white);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: 20px;
+  box-shadow: var(--shadow-sm);
+}
+
+.training-card + .training-card {
+  margin-top: 16px;
+}
+
+.training-video-section__title {
+  margin: 0 0 4px;
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--color-text-main);
+}
+
+.training-video-section__count {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--color-text-sub);
+}
+
+.training-video-empty {
+  padding: 32px 16px;
+  text-align: center;
+  font-size: 14px;
+  color: var(--color-text-muted);
+  border: 1px dashed var(--color-border);
+  border-radius: var(--radius-sm);
+}
+
+/* 영상 패널 */
+.training-video-panel__hero {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin: -4px -4px 16px;
+  padding: 16px 18px;
+  border-radius: var(--radius-md);
+  background: linear-gradient(135deg, #EEF4FF 0%, #F5F3FF 100%);
+  border: 1px solid #E0E7FF;
+}
+
+.training-video-panel__eyebrow {
+  margin: 0 0 4px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  color: #4F46E5;
+}
+
+.training-video-panel__title {
+  margin: 0 0 4px;
+  font-size: 17px;
+  font-weight: 700;
+  color: var(--color-text-main);
+}
+
+.training-video-panel__sub {
+  margin: 0;
+  font-size: 13px;
+  color: var(--color-text-sub);
+}
+
+.training-video-panel__badge {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  width: 64px;
+  height: 64px;
+  border-radius: 50%;
+  background: #fff;
+  border: 3px solid #7C3AED;
+  box-shadow: 0 2px 8px rgba(124, 58, 237, 0.15);
+}
+
+.training-video-panel__badge-value {
+  font-size: 16px;
+  font-weight: 800;
+  color: #6D28D9;
+  line-height: 1;
+}
+
+.training-video-panel__badge-label {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--color-text-muted);
+}
+
+.training-video-layout {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 16px;
+  align-items: start;
+}
+
+.training-video-layout--single {
+  grid-template-columns: 1fr;
+}
+
+.training-video-player-wrap {
+  min-width: 0;
+}
+
+/* 영상 선택 목록 (영상 위에 가로로 배치해 영상 자체는 항상 전체 너비를 사용) */
+.training-video-picker__label {
+  margin: 0 0 8px;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--color-text-sub);
+}
+
+.training-video-picker {
+  display: flex;
+  flex-direction: row;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.training-video-picker__item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 1 1 220px;
+  max-width: 320px;
+  padding: 10px 12px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg-white);
+  color: var(--color-text-main);
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.training-video-picker__index {
+  flex-shrink: 0;
+  width: 24px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: #F3F4F6;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--color-text-sub);
+}
+
+.training-video-picker__text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.training-video-picker__name {
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+.training-video-picker__rate {
+  font-size: 11px;
+  color: var(--color-text-muted);
+}
+
+.training-video-picker__item:hover {
+  border-color: #C4B5FD;
+  background: #FAFAFF;
+}
+
+.training-video-picker__item--active {
+  border-color: #7C3AED;
+  background: #F5F3FF;
+}
+
+.training-video-picker__item--active .training-video-picker__index {
+  background: #7C3AED;
+  color: #fff;
+}
+
+.training-video-picker__item--done {
+  border-color: #BBF7D0;
+}
+
+.training-video-picker__badge {
+  flex-shrink: 0;
+  font-size: 11px;
+  font-weight: 700;
+  color: #16A34A;
+}
+
+.training-video-now-playing__title {
+  margin: 0 0 12px;
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--color-text-main);
+}
+
+/* 영상 플레이어 */
+.training-video-player__frame {
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  background: #000;
+  aspect-ratio: 16 / 9;
+}
+
+.training-video-player__frame video {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.training-video-player__empty {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #9CA3AF;
+  font-size: 14px;
+}
+
+.training-video-player__meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 12px;
+  font-size: 13px;
+  color: var(--color-text-sub);
+}
+
+.training-video-player__rate {
+  font-size: 13px;
+  font-weight: 700;
+  color: #6D28D9;
+}
+
+.training-video-player__bar {
+  margin-top: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: #F3F4F6;
+  overflow: hidden;
+}
+
+.training-video-player__bar-fill {
+  height: 100%;
+  background: #7C3AED;
+  border-radius: 999px;
+  transition: width 0.2s;
+}
+
+.training-video-player__toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+/* 가이드 패널 */
+.training-guide-panel {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.training-guide-panel__head {
+  flex: 1;
+  min-width: 0;
+}
+
+.training-guide-panel__eyebrow {
+  margin: 0 0 4px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  color: #4F46E5;
+}
+
+/* 이수 체크리스트 */
+.training-steps {
+  background: var(--color-bg-white);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: 16px;
+  box-shadow: var(--shadow-sm);
+}
+
+.training-steps__title {
+  margin: 0 0 12px;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--color-text-main);
+}
+
+.training-steps__list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.training-steps__list li {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.training-steps__num {
+  flex-shrink: 0;
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: #F3F4F6;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--color-text-sub);
+}
+
+.training-steps__text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-text-main);
+}
+
+.training-steps__text small {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--color-text-muted);
+}
+
+.training-steps__item--done .training-steps__num {
+  background: #16A34A;
+  color: #fff;
+}
+
+.training-steps__item--done .training-steps__text {
+  color: #15803D;
+}
+
+.training-guide-card__info-title {
+  margin: 0 0 6px;
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--color-text-main);
+}
+
+.training-guide-card__info-sub {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--color-text-muted);
+}
+
+/* 완료 버튼 영역 */
+.training-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 16px;
+}
+
+/* 로딩 상태 */
+.training-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  background: var(--color-bg-main);
+}
+
+.training-loading__text {
+  font-size: 14px;
+  color: var(--color-text-muted);
+}
+
+@media (min-width: 1400px) {
+  .training-video-panel__title {
+    font-size: 19px;
+  }
+
+  .training-video-panel__sub {
+    font-size: 14px;
+  }
+
+  .training-video-panel__badge {
+    width: 72px;
+    height: 72px;
+  }
+
+  .training-video-panel__badge-value {
+    font-size: 18px;
+  }
+
+  .training-intro__desc {
+    font-size: 15px;
+  }
+}
+
+@media (max-width: 960px) {
+  .training-page__shell {
+    grid-template-columns: 1fr;
+    padding: 0 16px 32px;
+  }
+
+  .training-page__aside {
+    position: static;
+    order: -1;
+  }
+
+  .training-summary-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 10px;
+  }
+
+  .training-guide-panel {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .training-guide-panel .btn {
+    width: 100%;
+  }
+
+  .training-actions .btn {
+    width: 100%;
+  }
+}
+
+@media (max-width: 768px) {
+  .training-summary-grid {
+    grid-template-columns: 1fr;
+  }
+}

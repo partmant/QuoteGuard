@@ -1,0 +1,777 @@
+package com.project.back.domain.quote.service;
+
+import com.project.back.domain.customer.entity.Customer;
+import com.project.back.domain.customer.repository.CustomerRepository;
+import com.project.back.domain.discount.entity.DiscountPolicy;
+import com.project.back.domain.discount.repository.DiscountPolicyRepository;
+import com.project.back.domain.product.entity.Product;
+import com.project.back.domain.product.repository.ProductRepository;
+import com.project.back.domain.quote.dto.response.AdminQuoteListResponse;
+import com.project.back.domain.quote.dto.response.QuoteDetailResponse;
+import com.project.back.domain.quote.dto.response.QuoteProductContextResponse;
+import com.project.back.domain.quote.entity.Quote;
+import com.project.back.domain.approval.entity.ApprovalRequest;
+import com.project.back.domain.approval.entity.QuoteApprovalReason;
+import com.project.back.domain.approval.repository.ApprovalRequestRepository;
+import com.project.back.domain.quote.entity.QuoteItem;
+import com.project.back.domain.quote.entity.QuoteCustomer;
+import com.project.back.domain.quote.entity.QuoteCompany;
+import com.project.back.domain.approval.repository.QuoteApprovalReasonRepository;
+import com.project.back.domain.quote.repository.QuoteItemRepository;
+import com.project.back.domain.quote.repository.QuoteRepository;
+import com.project.back.domain.training.service.TrainingService;
+import com.project.back.domain.user.entity.User;
+import com.project.back.domain.user.entity.UserRole;
+import com.project.back.domain.user.repository.UserRepository;
+import com.project.back.domain.user.service.UserStatsUpdateService;
+import com.project.back.global.enums.ApprovalReasonType;
+import com.project.back.global.enums.QuoteStatus;
+import com.project.back.global.exception.CustomException;
+import com.project.back.global.exception.ErrorCode;
+import jakarta.validation.constraints.*;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.scheduling.annotation.Scheduled;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
+import java.math.BigDecimal;
+import java.math.RoundingMode;
+import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
+import java.util.Arrays;
+import java.util.Comparator;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.function.Function;
+import java.util.stream.Collectors;
+
+@Slf4j
+@Service
+@RequiredArgsConstructor
+@Transactional(readOnly = true)
+public class QuoteService {
+
+    private final UserRepository userRepository;
+    private final QuoteRepository quoteRepository;
+    private final QuoteItemRepository quoteItemRepository;
+    private final QuoteApprovalReasonRepository approvalReasonRepository;
+    private final ApprovalRequestRepository approvalRequestRepository;
+    private final CustomerRepository customerRepository;
+    private final QuoteCalculationService calculationService;
+    private final ApprovalCheckService approvalCheckService;
+    private final TrainingService trainingService;
+    private final UserStatsUpdateService userStatsUpdateService;
+    private final DiscountPolicyRepository discountPolicyRepository;
+    private final ProductRepository productRepository;
+    private final com.project.back.notification.service.NotificationService notificationService;
+
+    @Transactional
+    public Quote saveDraft(User createdBy,
+                           Long customerId,
+                           String internalMemo,
+                           LocalDate issuedDate,
+                           LocalDate validUntil,
+                           String deliveryTerm,
+                           List<QuoteItemCommand> itemCommands) {
+
+        validateQuoteWriterRole(createdBy);
+        validateTrainingCompleted(createdBy);
+        validateQuoteDates(issuedDate, validUntil);
+        Customer customer = getCustomerOrThrow(customerId, createdBy.getId());
+
+        //원본 고객 엔티티 데이터 복사 후 발행 시점 박제용 스냅샷 생성
+        QuoteCustomer customerSnapshot = QuoteCustomer.builder()
+                .companyName(customer.getCompanyName())
+                .contactName(customer.getContactName())
+                .email(customer.getEmail())
+                .phone(customer.getPhone())
+                .address(customer.getAddress())
+                .build();
+
+        //자사 정보 고정 스냅샷 생성
+        QuoteCompany companySnapshot = QuoteCompany.builder()
+                .name("QuoteGuard")
+                .businessNumber("123-45-67890")
+                .email("gurdians0708@gmail.com")
+                .phone("010-1234-5678")
+                .address("서울특별시 파이널구 21길 멋사빌딩 3층")
+                .build();
+
+        Quote quote = Quote.builder()
+                .createdBy(createdBy)
+                .customer(customer)
+                .quoteNumber(generateQuoteNumber())
+                .internalMemo(internalMemo)
+                .issuedDate(issuedDate)
+                .validUntil(validUntil)
+                .deliveryTerm(deliveryTerm)
+                .status(QuoteStatus.DRAFT)
+                .quoteCustomer(customerSnapshot)
+                .company(companySnapshot)
+                .build();
+
+        quoteRepository.save(quote);
+
+        List<QuoteItem> items = buildItems(quote, itemCommands, null);
+        assignStrictestDiscountPolicy(quote, items);
+        quoteItemRepository.saveAll(items);
+        calculationService.calculate(quote, items);
+
+        return quote;
+    }
+
+    @Transactional
+    public Quote submitQuote(Long quoteId, User requester) {
+        validateQuoteWriterRole(requester);
+        validateTrainingCompleted(requester);
+        Quote quote = getQuoteWithDetailsOrThrow(quoteId);
+        validateOwner(quote, requester);
+        validateEditable(quote);
+        validateQuoteDates(quote.getIssuedDate(), quote.getValidUntil());
+
+        List<QuoteItem> items = loadItemsForPolicyCheck(quoteId);
+        List<ApprovalReasonType> reasons = approvalCheckService.check(
+                items, quote.getTotalAmount(), quote.getProfitRate());
+
+        boolean approvalRequired = !reasons.isEmpty();
+
+        // 이전 승인/반려 사유 초기화 (orphanRemoval — bulk delete와 중복 호출 금지)
+        quote.getApprovalReasons().clear();
+
+        if (approvalRequired) {
+            List<QuoteApprovalReason> reasonEntities = reasons.stream()
+                    .map(r -> QuoteApprovalReason.of(quote, r, r.getDefaultMessage()))
+                    .toList();
+            approvalReasonRepository.saveAll(reasonEntities);
+        }
+
+        quote.complete(approvalRequired);
+        userStatsUpdateService.recalculateAfterCommit(requester.getId());
+
+        return quote;
+    }
+
+    // 견적 취소 — 작성자 본인 또는 SUPER_ADMIN만 가능. PENDING 승인 요청이 있으면 함께 취소 처리한다.
+    @Transactional
+    public Quote cancelQuote(Long quoteId, User requester) {
+        Quote quote = getQuoteWithDetailsOrThrow(quoteId);
+        validateCancelPermission(quote, requester);
+
+        quote.cancel();
+
+        approvalRequestRepository.findByQuote_IdAndStatus(quoteId, ApprovalRequest.ApprovalStatus.PENDING)
+                .ifPresent(ApprovalRequest::cancel);
+
+        return quote;
+    }
+
+    @Transactional
+    public Quote updateQuote(Long quoteId, User requester, Long customerId,
+                             String internalMemo,
+                             LocalDate issuedDate,
+                             LocalDate validUntil,
+                             String deliveryTerm,
+                             List<QuoteItemCommand> itemCommands) {
+
+        validateQuoteWriterRole(requester);
+        validateTrainingCompleted(requester);
+        validateQuoteDates(issuedDate, validUntil);
+        Quote quote = getQuoteWithDetailsOrThrow(quoteId);
+        validateOwner(quote, requester);
+        validateEditable(quote);
+
+        // 이전 반려/승인 사유 초기화
+        quote.getApprovalReasons().clear();
+
+        Customer customer = getCustomerOrThrow(customerId, requester.getId());
+
+        QuoteCustomer snapshot = QuoteCustomer.builder()
+                .companyName(customer.getCompanyName())
+                .contactName(customer.getContactName())
+                .email(customer.getEmail())
+                .phone(customer.getPhone())
+                .address(customer.getAddress())
+                .build();
+
+        quote.updateInfo(customer, snapshot, internalMemo, issuedDate, validUntil, deliveryTerm);
+
+        Map<Long, QuoteItem> existingByProductId = quote.getItems().stream()
+                .filter(item -> item.getProductId() != null)
+                .collect(Collectors.toMap(QuoteItem::getProductId, Function.identity(), (a, b) -> a));
+
+        List<QuoteItem> newItems = buildItems(quote, itemCommands, existingByProductId);
+
+        // 엔티티 내부에서 클리어하고 새로 추가
+        quote.replaceItems(newItems);
+        assignStrictestDiscountPolicy(quote, newItems);
+
+        // 상태를 REVISING으로 명시하여 수정 중임을 확실히 함
+        quote.startRevising();
+
+        calculationService.calculate(quote, newItems);
+
+        return quote;
+    }
+
+    public List<Quote> searchMyQuotes(Long userId, QuoteStatus status, String customerName,
+                                      String quoteNumber, LocalDateTime from, LocalDateTime to) {
+        return quoteRepository.searchMyQuotes(userId, status, customerName, quoteNumber, from, to);
+    }
+
+    // 전체 견적 목록(SUPER_ADMIN 전용)
+    public List<AdminQuoteListResponse> searchAdminQuotes(User requester,
+                                                          QuoteStatus status,
+                                                          String customerName,
+                                                          String quoteNumber,
+                                                          String writerName,
+                                                          LocalDateTime from,
+                                                          LocalDateTime to) {
+        if (requester.getRole() != UserRole.SUPER_ADMIN) {
+            throw new CustomException(ErrorCode.ACCESS_DENIED);
+        }
+
+        return quoteRepository.searchAdminQuotes(
+                        status, customerName, quoteNumber, writerName, from, to)
+                .stream()
+                .map(AdminQuoteListResponse::from)
+                .toList();
+    }
+
+    // 담당 영업사원 견적(SALES_MANAGER, 동일 department)
+    public List<AdminQuoteListResponse> searchManagerQuotes(User requester,
+                                                            QuoteStatus status,
+                                                            String customerName,
+                                                            String quoteNumber,
+                                                            String writerName,
+                                                            LocalDateTime from,
+                                                            LocalDateTime to) {
+        if (requester.getRole() != UserRole.SALES_MANAGER) {
+            throw new CustomException(ErrorCode.ACCESS_DENIED);
+        }
+        if (requester.getDepartment() == null || requester.getDepartment().isBlank()) {
+            throw new CustomException(ErrorCode.ACCESS_DENIED);
+        }
+
+        return quoteRepository.searchManagerQuotes(
+                        requester.getDepartment(), status, customerName, quoteNumber, writerName, from, to)
+                .stream()
+                .map(AdminQuoteListResponse::from)
+                .toList();
+    }
+
+    public Quote getQuoteDetail(Long quoteId, User requester) {
+        Quote quote = getQuoteWithDetailsOrThrow(quoteId);
+        validateQuoteReadAccess(quote, requester);
+        return quote;
+    }
+
+    public record InternalAnalysisResult(
+            Quote quote,
+            boolean approvalRequired,
+            List<ApprovalReasonType> reasons,
+            List<QuoteItem> items
+    ) {}
+
+    public InternalAnalysisResult getInternalAnalysis(Long quoteId, User requester) {
+        Quote quote = getQuoteWithDetailsOrThrow(quoteId);
+        validateQuoteReadAccess(quote, requester);
+
+        List<QuoteItem> items = loadItemsForPolicyCheck(quoteId);
+
+        List<ApprovalReasonType> reasons = approvalCheckService.check(
+                items, quote.getTotalAmount(), quote.getProfitRate());
+
+        return new InternalAnalysisResult(quote, !reasons.isEmpty(), reasons, items);
+    }
+
+    /** 승인·내부분석용 — policy FK fetch + 구 데이터 policy 보강 */
+    @Transactional(readOnly = true)
+    public List<QuoteItem> loadItemsForPolicyCheck(Long quoteId) {
+        List<QuoteItem> items = quoteItemRepository.findByQuoteIdWithDiscountPolicyOrderBySortOrderAsc(quoteId);
+        resolveMissingItemPolicies(items);
+        return items;
+    }
+
+    /** DB 스냅샷이 없는 품목(구 견적)은 product 기준으로 policy 표시·검증용 보강 */
+    private void resolveMissingItemPolicies(List<QuoteItem> items) {
+        for (QuoteItem item : items) {
+            if (item.getProductId() == null) {
+                continue;
+            }
+            if (item.getDiscountPolicy() == null) {
+                productRepository.findById(item.getProductId())
+                        .filter(Product::isActive)
+                        .map(this::resolveApplicablePolicy)
+                        .ifPresent(item::assignDiscountPolicy);
+            } else if (item.getPolicyMaxDiscountRate() == null
+                    && item.getPolicyMinProfitRate() == null
+                    && item.getPolicyApprovalThresholdAmount() == null) {
+                item.assignDiscountPolicy(item.getDiscountPolicy());
+            }
+        }
+    }
+
+    @Transactional
+    public Quote reuseQuote(Long sourceQuoteId, User requester) {
+        validateQuoteWriterRole(requester);
+        validateTrainingCompleted(requester);
+        Quote source = getQuoteWithDetailsOrThrow(sourceQuoteId);
+        validateOwner(source, requester);
+
+        Quote newQuote = Quote.builder()
+                .createdBy(requester)
+                .customer(source.getCustomer())
+                .quoteNumber(generateQuoteNumber())
+                .internalMemo(source.getInternalMemo())
+                .issuedDate(LocalDate.now())
+                .validUntil(LocalDate.now().plusMonths(1))
+                .deliveryTerm(source.getDeliveryTerm())
+                .status(QuoteStatus.DRAFT)
+                .quoteCustomer(source.getQuoteCustomer())
+                .company(source.getCompany())
+                .build();
+
+        quoteRepository.save(newQuote);
+        List<QuoteItem> sourceItems = quoteItemRepository.findByQuoteIdOrderBySortOrderAsc(sourceQuoteId);
+        List<QuoteItem> rebuiltItems = rebuildItemsWithCurrentPrice(newQuote, sourceItems);
+        assignStrictestDiscountPolicy(newQuote, rebuiltItems);
+        quoteItemRepository.saveAll(rebuiltItems);
+        calculationService.calculate(newQuote, rebuiltItems);
+
+        return newQuote;
+    }
+
+    @Transactional
+    public Quote rewriteExpiredQuote(Long expiredQuoteId, User requester) {
+        validateQuoteWriterRole(requester);
+        validateTrainingCompleted(requester);
+        Quote expired = getQuoteWithDetailsOrThrow(expiredQuoteId);
+        validateOwner(expired, requester);
+
+        if (expired.getStatus() != QuoteStatus.EXPIRED)
+            throw new CustomException(ErrorCode.QUOTE_NOT_EXPIRED);
+
+        Long originalId = expired.getOriginalQuote() != null
+                ? expired.getOriginalQuote().getId() : expired.getId();
+
+        int nextVersion = quoteRepository.findByOriginalQuoteIdOrderByVersionNoAsc(originalId)
+                .stream().mapToInt(Quote::getVersionNo).max().orElse(expired.getVersionNo()) + 1;
+
+        expired.markAsNotLatest();
+
+        Quote originalQuote = expired.getOriginalQuote() != null ? expired.getOriginalQuote() : expired;
+
+        Quote newQuote = Quote.builder()
+                .createdBy(requester)
+                .customer(expired.getCustomer())
+                .quoteNumber(generateQuoteNumber())
+                .internalMemo(expired.getInternalMemo())
+                .issuedDate(LocalDate.now())
+                .validUntil(LocalDate.now().plusMonths(1))
+                .deliveryTerm(expired.getDeliveryTerm())
+                .status(QuoteStatus.DRAFT)
+                .versionNo(nextVersion)
+                .isLatest(true)
+                .originalQuote(originalQuote)
+                .quoteCustomer(expired.getQuoteCustomer())
+                .company(expired.getCompany())
+                .build();
+
+        quoteRepository.save(newQuote);
+        List<QuoteItem> rebuiltItems = rebuildItemsWithCurrentPrice(newQuote,
+                quoteItemRepository.findByQuoteIdOrderBySortOrderAsc(expiredQuoteId));
+        assignStrictestDiscountPolicy(newQuote, rebuiltItems);
+        quoteItemRepository.saveAll(rebuiltItems);
+        calculationService.calculate(newQuote, rebuiltItems);
+
+        return newQuote;
+    }
+
+    @Scheduled(cron = "0 0 0 * * *")
+    @Transactional
+    public void expireOverdueQuotes() {
+        quoteRepository.findExpiredQuotes(
+                        Arrays.asList(QuoteStatus.APPROVAL_NOT_REQUIRED, QuoteStatus.APPROVED))
+                .forEach(Quote::expire);
+    }
+
+    // 매일 자정, 3일 후 만료 예정인 견적의 작성자에게 만료 임박 알림을 발송한다.
+    @Scheduled(cron = "0 5 0 * * *")
+    @Transactional
+    public void notifyExpiringQuotes() {
+        LocalDate today = LocalDate.now();
+        LocalDate until = today.plusDays(3);
+        // 오늘~3일 후 만료 예정이면서 아직 알림을 보내지 않은 견적 (스케줄러 누락 시 catch-up)
+        List<Quote> quotes = quoteRepository.findExpiringBetween(
+                today, until,
+                Arrays.asList(QuoteStatus.APPROVAL_NOT_REQUIRED, QuoteStatus.APPROVED, QuoteStatus.SENT));
+
+        for (Quote quote : quotes) {
+            // 한 건의 알림 실패가 나머지 배치를 중단시키지 않도록 항목별로 격리한다.
+            try {
+                long days = java.time.temporal.ChronoUnit.DAYS.between(today, quote.getValidUntil());
+                String when = days <= 0 ? "오늘" : days + "일 후";
+                notificationService.create(
+                        quote.getCreatedBy().getId(),
+                        com.project.back.notification.entity.NotificationType.QUOTE_EXPIRING,
+                        "견적 만료 임박",
+                        "견적 " + quote.getQuoteNumber() + " 이(가) " + when + " 만료됩니다.",
+                        com.project.back.notification.entity.NotificationRelatedType.QUOTE,
+                        quote.getId());
+                // 중복 발송 방지 플래그 (알림 성공 시에만 기록)
+                quote.markExpiringNotified(today);
+            } catch (Exception e) {
+                log.warn("만료 임박 알림 생성 실패 - quoteId={}, quoteNumber={}",
+                        quote.getId(), quote.getQuoteNumber(), e);
+            }
+        }
+    }
+
+    public QuoteDetailResponse getQuote(String quoteNumber, Long userId) {
+        User user = findUser(userId);
+        Quote quote = quoteRepository.findByQuoteNumberAndCreatedByWithDetails(quoteNumber, user)
+                .orElseThrow(() -> new CustomException(ErrorCode.QUOTE_NOT_FOUND));
+        quoteRepository.findByIdWithApprovalReasons(quote.getId());
+        return QuoteDetailResponse.from(quote);
+    }
+
+    /**
+     * 고객 발송(이메일) 가능 여부 검증.
+     * 승인 완료·승인 불필요·발송 완료(재발송)만 허용하며, EXPIRED 및 유효기간 경과 견적은 차단한다.
+     */
+    public void validateQuoteSendable(Quote quote) {
+        LocalDate today = LocalDate.now();
+        if (quote.getStatus() == QuoteStatus.EXPIRED) {
+            throw new CustomException(ErrorCode.QUOTE_EXPIRED_NOT_SENDABLE);
+        }
+        if (quote.getIssuedDate() != null && today.isBefore(quote.getIssuedDate())) {
+            throw new CustomException(ErrorCode.QUOTE_NOT_YET_ISSUED);
+        }
+        if (quote.getValidUntil() != null && quote.getValidUntil().isBefore(today)) {
+            throw new CustomException(ErrorCode.QUOTE_VALIDITY_EXPIRED);
+        }
+        if (quote.getStatus() != QuoteStatus.APPROVED
+                && quote.getStatus() != QuoteStatus.APPROVAL_NOT_REQUIRED
+                && quote.getStatus() != QuoteStatus.SENT) {
+            throw new CustomException(ErrorCode.QUOTE_NOT_SENDABLE);
+        }
+    }
+
+    @Transactional
+    public void markQuoteAsSent(Quote quote) {
+        if (quote.getStatus() != QuoteStatus.SENT) {
+            quote.markAsSent();
+            userStatsUpdateService.recalculateAfterCommit(quote.getCreatedBy().getId());
+        }
+    }
+
+    // 견적 작성용 — 제품 원가·적용 할인정책
+    public QuoteProductContextResponse getProductContextForQuote(Long productId, Long userId) {
+        User user = findUser(userId);
+        validateQuoteWriterRole(user);
+        validateTrainingCompleted(user);
+
+        Product product = productRepository.findById(productId)
+                .orElseThrow(() -> new CustomException(ErrorCode.PRODUCT_NOT_FOUND));
+        if (!product.isActive()) {
+            throw new CustomException(ErrorCode.PRODUCT_NOT_FOUND);
+        }
+
+        DiscountPolicy policy = resolveApplicablePolicy(product);
+        return QuoteProductContextResponse.of(product, policy);
+    }
+
+    private DiscountPolicy resolveApplicablePolicy(Product product) {
+        List<DiscountPolicy> candidates = discountPolicyRepository.findApplicableCandidates(
+                product.getId(),
+                product.getCategory().getId()
+        );
+
+        return candidates.stream()
+                .min(Comparator.comparingInt(p -> switch (p.getTargetType()) {
+                    case PRODUCT -> 1;
+                    case CATEGORY -> 2;
+                    case ALL -> 3;
+                }))
+                .orElse(null);
+    }
+
+    private Customer getCustomerOrThrow(Long customerId, Long requesterId) {
+        return customerRepository.findByIdAndUserId(customerId, requesterId)
+                .orElseThrow(() -> new CustomException(ErrorCode.CUSTOMER_NOT_FOUND));
+    }
+
+    private Quote getQuoteWithDetailsOrThrow(Long quoteId) {
+        Quote quote = quoteRepository.findByIdWithDetails(quoteId)
+                .orElseThrow(() -> new CustomException(ErrorCode.QUOTE_NOT_FOUND));
+        quoteRepository.findByIdWithApprovalReasons(quoteId);
+        return quote;
+    }
+
+    private void validateOwner(Quote quote, User requester) {
+        if (!quote.getCreatedBy().getId().equals(requester.getId()))
+            throw new CustomException(ErrorCode.QUOTE_ACCESS_DENIED);
+    }
+
+    // 견적 취소 권한 — 작성자 본인 또는 SUPER_ADMIN만 허용
+    private void validateCancelPermission(Quote quote, User requester) {
+        boolean isOwner = quote.getCreatedBy().getId().equals(requester.getId());
+        boolean isSuperAdmin = requester.getRole() == UserRole.SUPER_ADMIN;
+        if (!isOwner && !isSuperAdmin) {
+            throw new CustomException(ErrorCode.QUOTE_ACCESS_DENIED);
+        }
+    }
+
+    // 소유자, SUPER_ADMIN(전체), SALES_MANAGER(동일 부서 영업사원)
+    private void validateQuoteReadAccess(Quote quote, User requester) {
+        if (quote.getCreatedBy().getId().equals(requester.getId())) {
+            return;
+        }
+        if (requester.getRole() == UserRole.SUPER_ADMIN) {
+            return;
+        }
+        if (requester.getRole() == UserRole.SALES_MANAGER) {
+            User writer = quote.getCreatedBy();
+            if (writer.getRole() != UserRole.SALES_STAFF) {
+                throw new CustomException(ErrorCode.QUOTE_ACCESS_DENIED);
+            }
+            String dept = requester.getDepartment();
+            if (dept == null || dept.isBlank()
+                    || writer.getDepartment() == null
+                    || !dept.equals(writer.getDepartment())) {
+                throw new CustomException(ErrorCode.QUOTE_ACCESS_DENIED);
+            }
+            return;
+        }
+        throw new CustomException(ErrorCode.QUOTE_ACCESS_DENIED);
+    }
+
+    private void validateEditable(Quote quote) {
+        if (quote.getStatus() != QuoteStatus.DRAFT && quote.getStatus() != QuoteStatus.REVISING)
+            throw new CustomException(ErrorCode.QUOTE_NOT_EDITABLE);
+    }
+
+    private void validateTrainingCompleted(User user) {
+        if (!trainingService.isTrainingCompleted(user)) {
+            throw new CustomException(ErrorCode.TRAINING_NOT_COMPLETED);
+        }
+    }
+
+    private void validateQuoteDates(LocalDate issuedDate, LocalDate validUntil) {
+        if (validUntil == null) {
+            throw new CustomException(ErrorCode.QUOTE_VALID_UNTIL_REQUIRED);
+        }
+        if (issuedDate != null && validUntil.isBefore(issuedDate)) {
+            throw new CustomException(ErrorCode.QUOTE_VALID_UNTIL_INVALID);
+        }
+        if (validUntil.isBefore(LocalDate.now())) {
+            throw new CustomException(ErrorCode.QUOTE_VALID_UNTIL_INVALID);
+        }
+    }
+
+    // 견적 작성·수정 — 영업사원·영업관리자만 (최고관리자 불가)
+    private void validateQuoteWriterRole(User user) {
+        if (user.getRole() == UserRole.SUPER_ADMIN) {
+            throw new CustomException(ErrorCode.ACCESS_DENIED);
+        }
+    }
+
+    private String generateQuoteNumber() {
+        String base = "Q" + LocalDate.now().format(DateTimeFormatter.ofPattern("yyyyMMdd"));
+        String suffix = String.format("%06d", (long) (Math.random() * 1_000_000));
+        String candidate = base + suffix;
+        while (quoteRepository.existsByQuoteNumber(candidate)) {
+            suffix = String.format("%06d", (long) (Math.random() * 1_000_000));
+            candidate = base + suffix;
+        }
+        return candidate;
+    }
+
+    /** 견적 헤더 discount_policy_id — 품목 policy 중 가장 보수적인 1개 (감사·표시용) */
+    private void assignStrictestDiscountPolicy(Quote quote, List<QuoteItem> items) {
+        quote.assignDiscountPolicy(pickStrictestPolicy(items));
+    }
+
+    private DiscountPolicy pickStrictestPolicy(List<QuoteItem> items) {
+        return items.stream()
+                .map(QuoteItem::getDiscountPolicy)
+                .filter(Objects::nonNull)
+                .max(strictestPolicyComparator())
+                .orElse(null);
+    }
+
+    private Comparator<DiscountPolicy> strictestPolicyComparator() {
+        return Comparator
+                .comparing(DiscountPolicy::getMinProfitRate, Comparator.nullsFirst(Comparator.naturalOrder()))
+                .thenComparing(
+                        DiscountPolicy::getApprovalThresholdAmount,
+                        Comparator.nullsFirst(Comparator.reverseOrder()));
+    }
+
+    private List<QuoteItem> buildItems(Quote quote,
+                                       List<QuoteItemCommand> commands,
+                                       Map<Long, QuoteItem> existingByProductId) {
+        int[] order = {0};
+        return commands.stream()
+                .map(cmd -> {
+                    var product = productRepository.findById(cmd.productId())
+                            .orElseThrow(() -> new CustomException(ErrorCode.PRODUCT_NOT_FOUND));
+                    if (!product.isActive()) throw new CustomException(ErrorCode.PRODUCT_NOT_FOUND);
+
+                    ItemPriceSnapshot prices = resolveItemPrices(product, existingByProductId);
+                    DiscountPolicy itemPolicy = resolveApplicablePolicy(product);
+
+                    validateDiscountReasonAgainstPolicy(
+                            itemPolicy, cmd.discountRate(), cmd.discountReason(), cmd.quantity(),
+                            prices.unitPrice(), prices.costPrice());
+
+                    QuoteItem item = QuoteItem.builder()
+                            .quote(quote)
+                            .productId(product.getId())
+                            .productName(product.getName())
+                            .productCode(product.getCode())
+                            .spec(product.getSpec())
+                            .unitPrice(prices.unitPrice())
+                            .costPrice(prices.costPrice())
+                            .quantity(cmd.quantity())
+                            .discountRate(cmd.discountRate() != null ? cmd.discountRate() : BigDecimal.ZERO)
+                            .discountReason(cmd.discountReason())
+                            .vatApplicable(cmd.vatApplicable() != null ? cmd.vatApplicable() : true)
+                            .sortOrder(order[0]++)
+                            .build();
+                    item.assignDiscountPolicy(itemPolicy);
+
+                    quote.addItem(item);
+                    return item;
+                })
+                .toList();
+    }
+
+    /** 신규 초안은 제품 마스터 가격, 수정·재작성은 기존 품목 스냅샷(신규 품목만 마스터) */
+    private ItemPriceSnapshot resolveItemPrices(Product product, Map<Long, QuoteItem> existingByProductId) {
+        if (existingByProductId != null) {
+            QuoteItem existing = existingByProductId.get(product.getId());
+            if (existing != null) {
+                return new ItemPriceSnapshot(existing.getUnitPrice(), existing.getCostPrice());
+            }
+        }
+        return new ItemPriceSnapshot(product.getUnitPrice(), product.getCostPrice());
+    }
+
+    private record ItemPriceSnapshot(BigDecimal unitPrice, BigDecimal costPrice) {}
+
+     //할인율이 정책의 최대 할인율을 초과하거나,할인 적용 후 예상 이익률이 정책의 최소 이익률보다 낮으면 할인 사유를 필수로 요구한다.
+     // 정책이 없는 경우(discountPolicyId가 null)에는 검증을 생략한다.
+     // 기존 메서드를 수정하여 인자를 받도록 변경
+     private void validateDiscountReasonAgainstPolicy(DiscountPolicy policy,
+                                                      BigDecimal discountRate,
+                                                      String discountReason,
+                                                      BigDecimal quantity,
+                                                      BigDecimal unitPrice,
+                                                      BigDecimal costPrice) {
+         if (policy == null) return;
+
+         BigDecimal rate = discountRate != null ? discountRate : BigDecimal.ZERO;
+
+         // 정책 위반 여부 계산 로직
+         boolean exceedsMaxDiscount = policy.getMaxDiscountRate() != null
+                 && rate.compareTo(policy.getMaxDiscountRate()) > 0;
+
+         BigDecimal base = unitPrice.multiply(quantity);
+         BigDecimal discountAmount = rate.compareTo(BigDecimal.ZERO) > 0
+                 ? base.multiply(rate).divide(BigDecimal.valueOf(100), 2, RoundingMode.HALF_UP)
+                 : BigDecimal.ZERO;
+         BigDecimal lineSupply = base.subtract(discountAmount);
+         BigDecimal lineCost = costPrice.multiply(quantity);
+         BigDecimal profit = lineSupply.subtract(lineCost);
+         BigDecimal profitRate = lineSupply.compareTo(BigDecimal.ZERO) == 0
+                 ? BigDecimal.ZERO
+                 : profit.multiply(BigDecimal.valueOf(100)).divide(lineSupply, 2, RoundingMode.HALF_UP);
+
+         boolean belowMinProfit = policy.getMinProfitRate() != null
+                 && profitRate.compareTo(policy.getMinProfitRate()) < 0;
+
+         // 사유 검증
+         if ((exceedsMaxDiscount || belowMinProfit)
+                 && (discountReason == null || discountReason.isBlank())) {
+             throw new CustomException(ErrorCode.DISCOUNT_REASON_REQUIRED);
+         }
+     }
+
+
+     // reuseQuote·rewriteExpiredQuote 시 사용 — 품목 구성은 유지하고 단가·원가는 현재 제품 마스터 기준
+     private List<QuoteItem> rebuildItemsWithCurrentPrice(Quote newQuote, List<QuoteItem> sourceItems) {
+         int[] order = {0};
+         return sourceItems.stream()
+                 .map(src -> {
+                     //비활성 상품은 가져오지 않도록 filter 추가
+                     Product currentProduct = src.getProductId() != null
+                             ? productRepository.findById(src.getProductId())
+                               .filter(Product::isActive)
+                               .orElse(null)
+                             : null;
+
+                     // 만약 필수 제품이 비활성화되었다면 예외 처리하거나 null로 넘김
+                     if (src.getProductId() != null && currentProduct == null) {
+                         throw new CustomException(ErrorCode.PRODUCT_NOT_FOUND);
+                     }
+
+                     DiscountPolicy itemPolicy = null;
+                     if (currentProduct != null) {
+                         BigDecimal unitPrice = currentProduct.getUnitPrice();
+                         BigDecimal costPrice = currentProduct.getCostPrice();
+                         itemPolicy = resolveApplicablePolicy(currentProduct);
+                         validateDiscountReasonAgainstPolicy(
+                                 itemPolicy,
+                                 src.getDiscountRate(),
+                                 src.getDiscountReason(),
+                                 src.getQuantity(),
+                                 unitPrice,
+                                 costPrice
+                         );
+                     }
+
+                     QuoteItem item = QuoteItem.builder()
+                             .quote(newQuote)
+                             .productId(src.getProductId())
+                             .productName(currentProduct != null ? currentProduct.getName() : src.getProductName())
+                             .productCode(currentProduct != null ? currentProduct.getCode() : src.getProductCode())
+                             .spec(currentProduct != null ? currentProduct.getSpec() : src.getSpec())
+                             .unitPrice(currentProduct != null ? currentProduct.getUnitPrice() : src.getUnitPrice())
+                             .costPrice(currentProduct != null ? currentProduct.getCostPrice() : src.getCostPrice())
+                             .quantity(src.getQuantity())
+                             .discountRate(src.getDiscountRate())
+                             .discountReason(src.getDiscountReason())
+                             .vatApplicable(src.getVatApplicable())
+                             .sortOrder(order[0]++)
+                             .build();
+                     item.assignDiscountPolicy(itemPolicy);
+
+                     newQuote.addItem(item);
+                     return item;
+                 })
+                 .toList();
+     }
+
+    public record QuoteItemCommand(
+            @NotNull(message = "제품 ID는 필수입니다.") Long productId,
+            @NotBlank(message = "제품명은 필수입니다.") String productName,
+            String productCode,
+            @Size(max = 200) String spec,
+            @NotNull(message = "단가는 필수입니다.") @DecimalMin("0") BigDecimal unitPrice,
+            @NotNull(message = "원가는 필수입니다.") @DecimalMin("0") BigDecimal costPrice,
+            @NotNull(message = "수량은 필수입니다.") @DecimalMin("0.01") BigDecimal quantity,
+            @DecimalMin("0") @DecimalMax("100") BigDecimal discountRate,
+            @NotNull(message = "VAT 적용 여부는 필수입니다.") Boolean vatApplicable,
+            @Size(max = 255, message = "할인 사유는 255자 이내로 입력해주세요.")
+            String discountReason
+    ) {}
+
+    private User findUser(Long userId) {
+        return userRepository.findById(userId)
+                .orElseThrow(() -> new CustomException(ErrorCode.USER_NOT_FOUND));
+    }
+}

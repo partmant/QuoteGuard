@@ -279,8 +279,8 @@ docker compose pull && docker compose up -d back
 ### 2. 저장소 클론
 
 ```bash
-git clone https://github.com/partmant/quoteguard.git
-cd quoteguard
+git clone https://github.com/partmant/QuoteGuard.git
+cd QuoteGuard
 ```
 
 ### 3. DB 준비

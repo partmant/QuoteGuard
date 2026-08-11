@@ -6,6 +6,7 @@
 - **팀 구성**: 6인 (백엔드·프론트엔드 통합)
 - **역할**: 팀장 / 계정 관리 · 인증·인가 · 사용자 통계 · CI/CD
 - **배포**: [quoteguard.n-e.kr](https://quoteguard.n-e.kr) <sup>※ 비용·운영 상황에 따라 일시 중단될 수 있습니다</sup>
+- **테스트 계정**: 영업사원 [`demo.staff@quoteguard.com` / `salesDemo26!`] · 승인권자 [`demo.manager@quoteguard.com` / `managerDemo26!`] <sup>※ 매일 자정 데이터 초기화</sup>
 - **시연 영상**: [YouTube에서 보기](https://www.youtube.com/watch?v=8z_dxq2jHhA)
 
 > 이 저장소는 6인 팀 프로젝트의 백엔드와 프론트엔드 저장소를 개인 포트폴리오 용도로 통합한

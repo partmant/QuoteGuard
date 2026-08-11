@@ -12,7 +12,7 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: quoteguards/back
+  IMAGE_NAME: partmant/quoteguard-back
 
 concurrency:
   group: docker-build-push-back-${{ github.ref }}

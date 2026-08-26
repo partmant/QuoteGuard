@@ -10,6 +10,14 @@ server {
     # 백엔드까지 가지도 못하고 여기서 413(Content Too Large)으로 막히므로 상향한다.
     client_max_body_size 320m;
 
+    # back 컨테이너가 재배포로 재생성되면 내부 IP가 바뀐다. nginx는 기본적으로
+    # proxy_pass의 호스트명을 워커 시작 시 한 번만 DNS로 조회해 캐싱하므로,
+    # front를 재시작하지 않으면 재배포 이후에도 예전 IP로 계속 연결을 시도해
+    # 502/CORS 오류가 난다. Docker 내장 DNS(127.0.0.11)를 resolver로 지정하고
+    # proxy_pass에 변수를 사용하면(아래 각 location의 set $backend_upstream ...)
+    # 매 요청마다(valid TTL 주기로) 새로 조회하므로 이 문제가 재발하지 않는다.
+    resolver 127.0.0.11 valid=10s ipv6=off;
+
     gzip on;
     gzip_types text/plain text/css application/json application/javascript text/xml application/xml image/svg+xml;
     gzip_min_length 1024;
@@ -19,7 +27,8 @@ server {
     # 끊겨 브라우저에 ERR_HTTP2_PROTOCOL_ERROR가 발생하므로 별도 설정한다.
     # (일반 /api/ 규칙보다 더 긴 prefix라 nginx가 이 블록을 우선 매칭한다.)
     location /api/notifications/subscribe {
-        proxy_pass http://${BACKEND_HOST}/api/notifications/subscribe;
+        set $backend_upstream http://${BACKEND_HOST};
+        proxy_pass $backend_upstream/api/notifications/subscribe;
         proxy_http_version 1.1;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
@@ -34,7 +43,8 @@ server {
 
     # 백엔드 API 프록시 (BACKEND_HOST는 컨테이너 실행 시 env로 주입, 기본값 back:8080)
     location /api/ {
-        proxy_pass http://${BACKEND_HOST}/api/;
+        set $backend_upstream http://${BACKEND_HOST};
+        proxy_pass $backend_upstream/api/;
         proxy_http_version 1.1;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
@@ -48,7 +58,8 @@ server {
     # 곧바로 이 블록(백엔드 프록시)을 쓰도록 강제한다. 이게 없으면 /uploads/*.png
     # 요청이 아래 확장자 regex에 걸려 프론트 dist 폴더에서 try_files 404가 난다.
     location ^~ /uploads/ {
-        proxy_pass http://${BACKEND_HOST}/uploads/;
+        set $backend_upstream http://${BACKEND_HOST};
+        proxy_pass $backend_upstream/uploads/;
         proxy_http_version 1.1;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
